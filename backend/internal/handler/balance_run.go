@@ -125,6 +125,27 @@ func (h *BalanceHandler) Invalidate(c *gin.Context) {
 	api.Success(c, http.StatusOK, item)
 }
 
+func (h *BalanceHandler) Recalculate(c *gin.Context) {
+	id, ok := parseID(c, "id")
+	if !ok {
+		return
+	}
+	actor, ok := actorFromContext(c)
+	if !ok {
+		return
+	}
+	var request dto.RecalculateBalanceRequest
+	if !bindJSON(c, &request) {
+		return
+	}
+	output, err := h.service.Recalculate(c.Request.Context(), id, request, actor)
+	if err != nil {
+		api.Fail(c, err)
+		return
+	}
+	api.Success(c, http.StatusOK, gin.H{"superseded": output.Old, "recalculated": output.New})
+}
+
 func (h *BalanceHandler) Uncertainty(c *gin.Context) {
 	id, ok := parseID(c, "id")
 	if !ok {

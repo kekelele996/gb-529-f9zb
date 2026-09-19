@@ -50,5 +50,14 @@ export function useBalanceRun() {
     }
   }, [store.review])
 
-  return { ...store, working, run, submit, review }
+  const recalculate = useCallback(async (item: BalanceRun) => {
+    setWorking(true)
+    try {
+      return await store.recalculate(item)
+    } finally {
+      setWorking(false)
+    }
+  }, [store.recalculate])
+
+  return { ...store, working, run, submit, review, recalculate }
 }

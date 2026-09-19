@@ -62,6 +62,7 @@ func New(log *slog.Logger, authService *service.AuthService, handlers Handlers, 
 	protected.POST("/balances/run", runLimiter.Middleware("balance-run"), middleware.RBAC(constants.RoleProcessAnalyst, constants.RoleAdmin), handlers.Balance.Run)
 	protected.POST("/balances/:id/submit", middleware.RBAC(constants.RoleProcessAnalyst, constants.RoleAdmin), handlers.Balance.Submit)
 	protected.POST("/balances/:id/review", middleware.RBAC(constants.RoleReviewer, constants.RoleAdmin), handlers.Balance.Review)
+	protected.POST("/balances/:id/recalculate", runLimiter.Middleware("balance-recalculate"), middleware.RBAC(constants.RoleReviewer, constants.RoleAdmin), handlers.Balance.Recalculate)
 	protected.POST("/balances/:id/invalidate", middleware.RBAC(constants.RoleAdmin), handlers.Balance.Invalidate)
 
 	protected.GET("/audits", middleware.RBAC(constants.RoleReviewer, constants.RoleAdmin), handlers.Support.ListAudits)

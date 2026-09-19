@@ -34,9 +34,21 @@ func (r *TankRepository) List(ctx context.Context, page, pageSize int, status st
 	return tanks, total, nil
 }
 
+// TankGateHook 在储罐参数写入事务内执行边界证据完整性闸门。
+type TankGateHook func(ctx context.Context, tx *gorm.DB, before, after model.StorageTank) error
+
 func (r *TankRepository) Get(ctx context.Context, id uint) (model.StorageTank, error) {
+	return r.getTx(r.db.WithContext(ctx), id)
+}
+
+// GetTx 在给定事务内读取储罐参数。
+func (r *TankRepository) GetTx(ctx context.Context, tx *gorm.DB, id uint) (model.StorageTank, error) {
+	return r.getTx(tx.WithContext(ctx), id)
+}
+
+func (r *TankRepository) getTx(query *gorm.DB, id uint) (model.StorageTank, error) {
 	var tank model.StorageTank
-	if err := r.db.WithContext(ctx).First(&tank, id).Error; err != nil {
+	if err := query.First(&tank, id).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
 			return model.StorageTank{}, api.NewError(404, "TANK_NOT_FOUND", "储罐不存在")
 		}
@@ -61,7 +73,7 @@ func (r *TankRepository) Create(ctx context.Context, tank *model.StorageTank, ac
 	})
 }
 
-func (r *TankRepository) Update(ctx context.Context, updated, before model.StorageTank, expectedVersion uint, actor Actor) (model.StorageTank, error) {
+func (r *TankRepository) Update(ctx context.Context, updated, before model.StorageTank, expectedVersion uint, actor Actor, gate TankGateHook) (model.StorageTank, error) {
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		updates := map[string]any{
 			"name":                    updated.Name,
@@ -89,6 +101,11 @@ func (r *TankRepository) Update(ctx context.Context, updated, before model.Stora
 		audit := NewAudit(actor, "storage_tank.coefficients_updated", "storage_tank", updated.ID, before, updated)
 		if err := tx.Create(&audit).Error; err != nil {
 			return fmt.Errorf("audit storage tank update: %w", err)
+		}
+		if gate != nil && updated.CoefficientVersion != before.CoefficientVersion {
+			if err := gate(ctx, tx, before, updated); err != nil {
+				return fmt.Errorf("enforce boundary evidence gate: %w", err)
+			}
 		}
 		return nil
 	})

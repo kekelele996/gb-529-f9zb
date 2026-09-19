@@ -38,10 +38,10 @@ func main() {
 	supportRepo := repository.NewSupportRepository(db)
 
 	authService := service.NewAuthService(supportRepo, cfg.JWTSecret)
-	tankService := service.NewTankService(tankRepo)
-	measurementService := service.NewMeasurementService(measurementRepo, tankRepo)
-	transferService := service.NewTransferService(transferRepo, tankRepo)
 	balanceService := service.NewBalanceService(balanceRepo, tankRepo, measurementRepo, transferRepo)
+	tankService := service.NewTankService(tankRepo, balanceService)
+	measurementService := service.NewMeasurementService(measurementRepo, tankRepo, balanceService)
+	transferService := service.NewTransferService(transferRepo, tankRepo, balanceService)
 	auditService := service.NewAuditService(supportRepo)
 
 	handlers := router.Handlers{

@@ -1,5 +1,5 @@
 import { request, requestPage } from './client'
-import type { BalanceRun, BalanceRunInput, BalanceStatus, UncertaintyBreakdown } from '../types/balance'
+import type { BalanceRun, BalanceRunInput, BalanceStatus, RecalculationResult, UncertaintyBreakdown } from '../types/balance'
 
 export const listBalances = (tankId?: number) =>
   requestPage<BalanceRun>(`/balances?page=1&page_size=100${tankId ? '&tank_id=' + tankId : ''}`)
@@ -15,4 +15,6 @@ export const reviewBalance = (id: number, version: number, targetStatus: Extract
   })
 export const invalidateBalance = (id: number, version: number, reason: string) =>
   request<BalanceRun>(`/balances/${id}/invalidate`, { method: 'POST', body: JSON.stringify({ version, reason }) })
+export const recalculateBalance = (id: number, version: number) =>
+  request<RecalculationResult>(`/balances/${id}/recalculate`, { method: 'POST', body: JSON.stringify({ version }) })
 export const getUncertainty = (id: number) => request<UncertaintyBreakdown>(`/balances/${id}/uncertainty`)

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"time"
 
+	"gorm.io/gorm"
+
 	"lng-boiloff-gas-balance/backend/internal/balance"
 	"lng-boiloff-gas-balance/backend/internal/constants"
 	"lng-boiloff-gas-balance/backend/internal/dto"
@@ -16,10 +18,20 @@ import (
 type TransferService struct {
 	repo     *repository.TransferRepository
 	tankRepo *repository.TankRepository
+	gate     BoundaryEvidenceGate
 }
 
-func NewTransferService(repo *repository.TransferRepository, tankRepo *repository.TankRepository) *TransferService {
-	return &TransferService{repo: repo, tankRepo: tankRepo}
+func NewTransferService(repo *repository.TransferRepository, tankRepo *repository.TankRepository, gate BoundaryEvidenceGate) *TransferService {
+	return &TransferService{repo: repo, tankRepo: tankRepo, gate: gate}
+}
+
+func (s *TransferService) gateHook(actor repository.Actor) repository.TransferGateHook {
+	if s.gate == nil {
+		return nil
+	}
+	return func(ctx context.Context, tx *gorm.DB, item model.TransferOperation) error {
+		return s.gate.EnforceTransfer(ctx, tx, actor, item)
+	}
 }
 
 func (s *TransferService) List(ctx context.Context, filter repository.TransferFilter) ([]model.TransferOperation, int64, error) {
@@ -73,7 +85,7 @@ func (s *TransferService) Create(ctx context.Context, request dto.CreateTransfer
 		Version:                   1,
 		CreatedBy:                 actor.UserID,
 	}
-	if err := s.repo.Create(ctx, &item, actor); err != nil {
+	if err := s.repo.Create(ctx, &item, actor, s.gateHook(actor)); err != nil {
 		return model.TransferOperation{}, err
 	}
 	item.Tank = &tank
@@ -88,5 +100,5 @@ func (s *TransferService) Transition(ctx context.Context, id uint, request dto.T
 	if request.TargetStatus == "cancelled" && len(reason) < 6 {
 		return model.TransferOperation{}, api.NewError(422, "CANCELLATION_REASON_REQUIRED", "取消物理转移时必须填写不少于 6 个字符的原因")
 	}
-	return s.repo.Transition(ctx, id, request.Version, request.TargetStatus, reason, actor)
+	return s.repo.Transition(ctx, id, request.Version, request.TargetStatus, reason, actor, s.gateHook(actor))
 }

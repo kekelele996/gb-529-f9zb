@@ -68,7 +68,10 @@ func (r *TransferRepository) Get(ctx context.Context, id uint) (model.TransferOp
 	return item, nil
 }
 
-func (r *TransferRepository) Create(ctx context.Context, item *model.TransferOperation, actor Actor) error {
+// TransferGateHook 在转移写入事务内执行边界证据完整性闸门。
+type TransferGateHook func(ctx context.Context, tx *gorm.DB, item model.TransferOperation) error
+
+func (r *TransferRepository) Create(ctx context.Context, item *model.TransferOperation, actor Actor, gate TransferGateHook) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var overlaps int64
 		if err := tx.Model(&model.TransferOperation{}).
@@ -86,11 +89,16 @@ func (r *TransferRepository) Create(ctx context.Context, item *model.TransferOpe
 		if err := tx.Create(&audit).Error; err != nil {
 			return fmt.Errorf("audit transfer operation: %w", err)
 		}
+		if item.OperationStatus == "confirmed" && gate != nil {
+			if err := gate(ctx, tx, *item); err != nil {
+				return fmt.Errorf("enforce boundary evidence gate: %w", err)
+			}
+		}
 		return nil
 	})
 }
 
-func (r *TransferRepository) Transition(ctx context.Context, id, version uint, target, reason string, actor Actor) (model.TransferOperation, error) {
+func (r *TransferRepository) Transition(ctx context.Context, id, version uint, target, reason string, actor Actor, gate TransferGateHook) (model.TransferOperation, error) {
 	var updated model.TransferOperation
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var before model.TransferOperation
@@ -126,14 +134,28 @@ func (r *TransferRepository) Transition(ctx context.Context, id, version uint, t
 		if err := tx.Create(&audit).Error; err != nil {
 			return fmt.Errorf("audit transfer transition: %w", err)
 		}
+		if target == "confirmed" && gate != nil {
+			if err := gate(ctx, tx, updated); err != nil {
+				return fmt.Errorf("enforce boundary evidence gate: %w", err)
+			}
+		}
 		return nil
 	})
 	return updated, err
 }
 
 func (r *TransferRepository) ConfirmedForPeriod(ctx context.Context, tankID uint, start, end time.Time) ([]model.TransferOperation, error) {
+	return r.confirmedForPeriodTx(r.db.WithContext(ctx), tankID, start, end)
+}
+
+// ConfirmedForPeriodTx 在给定事务内汇总期间已确认转移。
+func (r *TransferRepository) ConfirmedForPeriodTx(ctx context.Context, tx *gorm.DB, tankID uint, start, end time.Time) ([]model.TransferOperation, error) {
+	return r.confirmedForPeriodTx(tx.WithContext(ctx), tankID, start, end)
+}
+
+func (r *TransferRepository) confirmedForPeriodTx(query *gorm.DB, tankID uint, start, end time.Time) ([]model.TransferOperation, error) {
 	var items []model.TransferOperation
-	if err := r.db.WithContext(ctx).
+	if err := query.
 		Where("tank_id = ? AND operation_status = ? AND start_at >= ? AND end_at <= ?", tankID, "confirmed", start.UTC(), end.UTC()).
 		Order("start_at ASC, id ASC").Find(&items).Error; err != nil {
 		return nil, fmt.Errorf("list confirmed period transfers: %w", err)

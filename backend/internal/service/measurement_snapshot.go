@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"gorm.io/gorm"
+
 	"lng-boiloff-gas-balance/backend/internal/balance"
 	"lng-boiloff-gas-balance/backend/internal/constants"
 	"lng-boiloff-gas-balance/backend/internal/dto"
@@ -17,10 +19,11 @@ import (
 type MeasurementService struct {
 	repo     *repository.MeasurementRepository
 	tankRepo *repository.TankRepository
+	gate     BoundaryEvidenceGate
 }
 
-func NewMeasurementService(repo *repository.MeasurementRepository, tankRepo *repository.TankRepository) *MeasurementService {
-	return &MeasurementService{repo: repo, tankRepo: tankRepo}
+func NewMeasurementService(repo *repository.MeasurementRepository, tankRepo *repository.TankRepository, gate BoundaryEvidenceGate) *MeasurementService {
+	return &MeasurementService{repo: repo, tankRepo: tankRepo, gate: gate}
 }
 
 func (s *MeasurementService) List(ctx context.Context, filter repository.MeasurementFilter) ([]model.MeasurementSnapshot, int64, error) {
@@ -74,11 +77,20 @@ func (s *MeasurementService) Create(ctx context.Context, request dto.CreateMeasu
 		SourceNote:                strings.TrimSpace(request.SourceNote),
 		CreatedBy:                 actor.UserID,
 	}
-	if err := s.repo.Create(ctx, &snapshot, actor); err != nil {
+	if err := s.repo.Create(ctx, &snapshot, actor, s.gateHook(actor)); err != nil {
 		return model.MeasurementSnapshot{}, err
 	}
 	snapshot.Tank = &tank
 	return snapshot, nil
+}
+
+func (s *MeasurementService) gateHook(actor repository.Actor) repository.BoundaryGateHook {
+	if s.gate == nil {
+		return nil
+	}
+	return func(ctx context.Context, tx *gorm.DB, snapshot model.MeasurementSnapshot) error {
+		return s.gate.EnforceMeasurement(ctx, tx, actor, snapshot)
+	}
 }
 
 func calculateMeasurement(tank model.StorageTank, request dto.CreateMeasurementRequest) (balance.SnapshotMassResult, error) {

@@ -12,6 +12,9 @@ import (
 	"lng-boiloff-gas-balance/backend/pkg/api"
 )
 
+// BoundaryGateHook 在快照写入事务内执行边界证据完整性闸门，返回错误会回滚整笔快照写入。
+type BoundaryGateHook func(ctx context.Context, tx *gorm.DB, snapshot model.MeasurementSnapshot) error
+
 type MeasurementFilter struct {
 	TankID   uint
 	Quality  string
@@ -67,7 +70,7 @@ func (r *MeasurementRepository) Get(ctx context.Context, id uint) (model.Measure
 	return snapshot, nil
 }
 
-func (r *MeasurementRepository) Create(ctx context.Context, snapshot *model.MeasurementSnapshot, actor Actor) error {
+func (r *MeasurementRepository) Create(ctx context.Context, snapshot *model.MeasurementSnapshot, actor Actor, gate BoundaryGateHook) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var existing int64
 		if err := tx.Model(&model.MeasurementSnapshot{}).
@@ -85,13 +88,27 @@ func (r *MeasurementRepository) Create(ctx context.Context, snapshot *model.Meas
 		if err := tx.Create(&audit).Error; err != nil {
 			return fmt.Errorf("audit measurement snapshot: %w", err)
 		}
+		if gate != nil {
+			if err := gate(ctx, tx, *snapshot); err != nil {
+				return fmt.Errorf("enforce boundary evidence gate: %w", err)
+			}
+		}
 		return nil
 	})
 }
 
 func (r *MeasurementRepository) BoundarySnapshots(ctx context.Context, tankID uint, periodStart, periodEnd time.Time) (model.MeasurementSnapshot, model.MeasurementSnapshot, error) {
+	return boundarySnapshotsTx(r.db.WithContext(ctx), tankID, periodStart, periodEnd)
+}
+
+// BoundarySnapshotsTx 在给定事务内选取边界快照，供替代重算与证据写入共享同一事务视图。
+func (r *MeasurementRepository) BoundarySnapshotsTx(ctx context.Context, tx *gorm.DB, tankID uint, periodStart, periodEnd time.Time) (model.MeasurementSnapshot, model.MeasurementSnapshot, error) {
+	return boundarySnapshotsTx(tx.WithContext(ctx), tankID, periodStart, periodEnd)
+}
+
+func boundarySnapshotsTx(query *gorm.DB, tankID uint, periodStart, periodEnd time.Time) (model.MeasurementSnapshot, model.MeasurementSnapshot, error) {
 	var opening model.MeasurementSnapshot
-	openingQuery := r.db.WithContext(ctx).
+	openingQuery := query.
 		Where("tank_id = ? AND measured_at <= ? AND quality_flag <> ?", tankID, periodStart.UTC(), constants.QualityInvalid).
 		Order("measured_at DESC, id DESC").First(&opening)
 	if openingQuery.Error != nil {
@@ -101,7 +118,7 @@ func (r *MeasurementRepository) BoundarySnapshots(ctx context.Context, tankID ui
 		return model.MeasurementSnapshot{}, model.MeasurementSnapshot{}, fmt.Errorf("load opening snapshot: %w", openingQuery.Error)
 	}
 	var closing model.MeasurementSnapshot
-	closingQuery := r.db.WithContext(ctx).
+	closingQuery := query.
 		Where("tank_id = ? AND measured_at >= ? AND measured_at <= ? AND quality_flag <> ?", tankID, periodStart.UTC(), periodEnd.UTC(), constants.QualityInvalid).
 		Order("measured_at DESC, id DESC").First(&closing)
 	if closingQuery.Error != nil {

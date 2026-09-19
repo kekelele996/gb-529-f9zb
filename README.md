@@ -41,7 +41,9 @@ docker compose ps
 - 计量快照：记录液位、液温、汽相压力、密度、不确定度和质量标记；写入时计算罐容、修正密度及液相质量，原值不可覆盖。
 - 物理转移：记录实际流入/流出、时间段、计量质量和物理参考；同一储罐的未取消时间段不得重叠。
 - 平衡运行：选择期初和期末有效快照，汇总期间已确认转移，保存完整输入、系数版本、方程和不确定度证据。
-- 独立复核：`queued -> calculating -> pending_review -> accepted | rejected | invalidated`，接受/驳回只允许复核员或管理员。
+- 边界证据完整性闸门：运行存证后，同储罐同期间若补录更接近边界的有效计量快照、确认晚录的流入/流出或更新罐容系数版本，原运行自动转为 `recalculate_required`（待重算），闸门在证据写入事务内置位，复核员不能接受、分析员不能重新提交。
+- 复核员原子替代重算：对待重算运行执行 `recalculate`，事务内按最新证据重新计算生成 `pending_review` 新记录（携带 `supersedes_id`），旧记录原子置为 `superseded`（携带 `superseded_by_id`）；唯一链与条件更新保证重复或并发替代只成功一次；任一步失败整体回滚，旧记录、替代链与审计保持原样。
+- 独立复核：`queued -> calculating -> pending_review -> accepted | rejected | invalidated`，闸门开放状态可转 `recalculate_required`，待重算运行由复核员替代为 `superseded` 后继；接受/驳回只允许复核员或管理员。
 - 审计追踪：参数、快照、转移、运行、提交和复核均保存 request ID、操作者及前后摘要。
 - 横切能力：JWT、RBAC、全局错误、结构化访问日志、request ID、panic recovery、本地令牌桶限流和优雅停机。
 
@@ -119,17 +121,18 @@ docker compose ps
 | `POST` | `/api/v1/balances/run` | 运行质量平衡 |
 | `POST` | `/api/v1/balances/:id/submit` | 提交独立复核 |
 | `POST` | `/api/v1/balances/:id/review` | 接受或驳回 |
+| `POST` | `/api/v1/balances/:id/recalculate` | 复核员原子替代重算（待重算 → 新待复核记录，旧记录已替代） |
 | `POST` | `/api/v1/balances/:id/invalidate` | 管理员作废 |
 | `GET` | `/api/v1/balances/:id/uncertainty` | 不确定度分解 |
 | `GET` | `/api/v1/audits` | 复核员/管理员查询审计 |
 
 ## 共享枚举出现位置
 
-`BalanceStatus = queued | calculating | pending_review | accepted | rejected | invalidated`：
+`BalanceStatus = queued | calculating | pending_review | accepted | rejected | invalidated | recalculate_required | superseded`：
 
 - 数据库/model：`backend/internal/model/balance_run.go`
-- 后端常量、DTO、repository、service、handler、router：`backend/internal/constants/balance.go`、`backend/internal/dto/balance_run.go`、`backend/internal/repository/balance_run.go`、`backend/internal/service/balance_run.go`、`backend/internal/handler/balance_run.go`、`backend/internal/router/router.go`
-- 前端类型、API、store、hook、组件和页面：`frontend/src/types/balance.ts`、`frontend/src/api/balances.ts`、`frontend/src/stores/balanceStore.ts`、`frontend/src/hooks/useBalanceRun.ts`、`frontend/src/components/common/EvidenceBreakdownPanel.tsx`、`frontend/src/pages/BalancesPage.tsx`
+- 后端常量、DTO、repository、service、handler、router：`backend/internal/constants/balance.go`、`backend/internal/dto/balance_run.go`、`backend/internal/repository/balance_run.go`、`backend/internal/service/balance_run.go`、`backend/internal/service/boundary_gate.go`、`backend/internal/handler/balance_run.go`、`backend/internal/router/router.go`
+- 前端类型、API、store、hook、组件和页面：`frontend/src/types/balance.ts`、`frontend/src/api/balances.ts`、`frontend/src/stores/balanceStore.ts`、`frontend/src/hooks/useBalanceRun.ts`、`frontend/src/components/common/EvidenceBreakdownPanel.tsx`、`frontend/src/components/common/RecalculationGateBanner.tsx`、`frontend/src/pages/BalancesPage.tsx`
 
 `DeviationLevel = within_uncertainty | watch | investigate | invalid`：
 
@@ -191,6 +194,8 @@ node scripts/api-smoke.mjs
 - `CLOSING_SNAPSHOT_MISSING`：期间内没有晚于期初的有效期末快照。
 - `TRANSFER_TIME_OVERLAP`：同一储罐已有时间重叠且未取消的物理转移。
 - `TANK_VERSION_CONFLICT` / `BALANCE_VERSION_CONFLICT`：数据被其他请求更新，刷新后使用新版本重试。
+- `BALANCE_RECALCULATE_REQUIRED`：边界证据完整性闸门已置位，原运行待重算，不能提交或接受，请由复核员执行替代重算。
+- `BALANCE_NOT_RECALCULATE_REQUIRED` / `BALANCE_ALREADY_SUPERSEDED`：目标运行不处于待重算状态，或已被其他替代请求处理；重复或并发替代只会成功一次，刷新后查看替代链。
 - 后端未 healthy：运行 `docker compose logs backend`，检查 JWT、数据库配置和 PostgreSQL 健康状态。
 - 前端 API 失败：确认 Nginx 的 `/api/` 使用无尾斜杠的 `proxy_pass http://backend:8080`，避免剥离 `/api`。
 

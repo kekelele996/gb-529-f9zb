@@ -11,6 +11,11 @@ interface BalanceState {
   run: (input: BalanceRunInput) => Promise<BalanceRun>
   submit: (item: BalanceRun) => Promise<BalanceRun>
   review: (item: BalanceRun, target: Extract<BalanceStatus, 'accepted' | 'rejected'>, note: string) => Promise<BalanceRun>
+  recalculate: (item: BalanceRun) => Promise<BalanceRun>
+}
+
+function upsert(items: BalanceRun[], candidate: BalanceRun): BalanceRun[] {
+  return [candidate, ...items.filter((item) => item.id !== candidate.id)]
 }
 
 export const useBalanceStore = create<BalanceState>((set) => ({
@@ -29,7 +34,7 @@ export const useBalanceStore = create<BalanceState>((set) => ({
   select: (id) => set({ selectedId: id }),
   run: async (input) => {
     const created = await api.runBalance(input)
-    set((state) => ({ items: [created, ...state.items.filter((item) => item.id !== created.id)], selectedId: created.id }))
+    set((state) => ({ items: upsert(state.items, created), selectedId: created.id }))
     return created
   },
   submit: async (item) => {
@@ -41,5 +46,14 @@ export const useBalanceStore = create<BalanceState>((set) => ({
     const updated = await api.reviewBalance(item.id, item.version, target, note)
     set((state) => ({ items: state.items.map((candidate) => candidate.id === updated.id ? updated : candidate), selectedId: updated.id }))
     return updated
+  },
+  recalculate: async (item) => {
+    const result = await api.recalculateBalance(item.id, item.version)
+    set((state) => {
+      const replaced = state.items
+        .map((candidate) => candidate.id === result.superseded.id ? result.superseded : candidate)
+      return { items: upsert(replaced, result.recalculated), selectedId: result.recalculated.id }
+    })
+    return result.recalculated
   }
 }))

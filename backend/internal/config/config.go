@@ -101,14 +101,57 @@ func OpenDatabase(cfg Config) (*gorm.DB, error) {
 }
 
 func migrate(db *gorm.DB) error {
-	return db.AutoMigrate(
+	if err := db.AutoMigrate(
 		&model.User{},
 		&model.StorageTank{},
 		&model.MeasurementSnapshot{},
 		&model.TransferOperation{},
 		&model.BalanceRun{},
 		&model.AuditEvent{},
-	)
+	); err != nil {
+		return err
+	}
+	return reconcileBalanceStatusCheck(db)
+}
+
+// reconcileBalanceStatusCheck 让既有 PostgreSQL 数据库接受待重算与已替代状态。
+// AutoMigrate 不会更新已存在的 check 约束，这里在约束定义缺少新枚举时原子替换。
+func reconcileBalanceStatusCheck(db *gorm.DB) error {
+	if db.Dialector.Name() != "postgres" {
+		return nil
+	}
+	const definition = "balance_status IN ('queued', 'calculating', 'pending_review', 'accepted', 'rejected', 'invalidated', 'recalculate_required', 'superseded')"
+	var existing struct {
+		ConstraintName string `gorm:"column:constraint_name"`
+		Definition     string `gorm:"column:definition"`
+	}
+	err := db.Raw(`
+		SELECT con.conname AS constraint_name, pg_get_constraintdef(con.oid) AS definition
+		FROM pg_constraint con
+		JOIN pg_class rel ON rel.oid = con.conrelid
+		WHERE rel.relname = 'balance_runs' AND con.contype = 'c' AND con.conname LIKE '%balance_status%'
+		ORDER BY con.oid
+		LIMIT 1`).Scan(&existing).Error
+	if err != nil {
+		return fmt.Errorf("inspect balance status check constraint: %w", err)
+	}
+	if existing.ConstraintName == "" {
+		return nil
+	}
+	if strings.Contains(existing.Definition, "'recalculate_required'") &&
+		strings.Contains(existing.Definition, "'superseded'") {
+		return nil
+	}
+	name := existing.ConstraintName
+	if err := db.Exec(fmt.Sprintf(
+		"ALTER TABLE balance_runs DROP CONSTRAINT %q", name)).Error; err != nil {
+		return fmt.Errorf("drop stale balance status check constraint: %w", err)
+	}
+	if err := db.Exec(fmt.Sprintf(
+		"ALTER TABLE balance_runs ADD CONSTRAINT %q CHECK (%s)", name, definition)).Error; err != nil {
+		return fmt.Errorf("add reconciled balance status check constraint: %w", err)
+	}
+	return nil
 }
 
 func seed(db *gorm.DB) error {

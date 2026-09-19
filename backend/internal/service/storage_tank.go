@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"gorm.io/datatypes"
+	"gorm.io/gorm"
 
 	"lng-boiloff-gas-balance/backend/internal/balance"
 	"lng-boiloff-gas-balance/backend/internal/constants"
@@ -18,9 +19,21 @@ import (
 
 type TankService struct {
 	repo *repository.TankRepository
+	gate BoundaryEvidenceGate
 }
 
-func NewTankService(repo *repository.TankRepository) *TankService { return &TankService{repo: repo} }
+func NewTankService(repo *repository.TankRepository, gate BoundaryEvidenceGate) *TankService {
+	return &TankService{repo: repo, gate: gate}
+}
+
+func (s *TankService) gateHook(actor repository.Actor) repository.TankGateHook {
+	if s.gate == nil {
+		return nil
+	}
+	return func(ctx context.Context, tx *gorm.DB, before, after model.StorageTank) error {
+		return s.gate.EnforceCoefficients(ctx, tx, actor, before, after)
+	}
+}
 
 func (s *TankService) List(ctx context.Context, page, pageSize int, status string) ([]model.StorageTank, int64, error) {
 	if status != "" && status != "active" && status != "calibration_due" && status != "inactive" {
@@ -87,7 +100,7 @@ func (s *TankService) Update(ctx context.Context, id uint, request dto.UpdateTan
 	updated.CapacityCurveJSON = datatypes.JSON(curveJSON)
 	updated.CoefficientVersion = strings.TrimSpace(request.CoefficientVersion)
 	updated.TankStatus = request.TankStatus
-	return s.repo.Update(ctx, updated, before, request.Version, actor)
+	return s.repo.Update(ctx, updated, before, request.Version, actor, s.gateHook(actor))
 }
 
 func (s *TankService) MeasurementQuality(ctx context.Context, id uint) (dto.TankMeasurementQuality, error) {

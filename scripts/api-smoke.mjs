@@ -261,13 +261,112 @@ async function main() {
     token: reviewer,
   });
   if (balances.meta.total < 2) fail("balance history is incomplete", balances);
+
+  // 边界证据完整性闸门：晚录确认的期间内流入把待复核运行置为待重算。
+  const gatedStart = "2026-07-02T01:00:00Z";
+  const gatedEnd = "2026-07-03T01:00:00Z";
+  await api("create gate-period closing snapshot", proxy, "/api/v1/measurements", {
+    method: "POST",
+    token: analyst,
+    status: 201,
+    body: {
+      ...measurement,
+      measured_at: "2026-07-03T00:30:00Z",
+      liquid_level_m: 9.9,
+      source_note: "API smoke gate period closing snapshot",
+    },
+  });
+  const gatedSubmitted = await runAndSubmit(analyst, tankID, gatedStart, gatedEnd, "gate-path");
+  await api("create late confirmed inflow", proxy, "/api/v1/transfers", {
+    method: "POST",
+    token: analyst,
+    status: 201,
+    body: {
+      tank_id: tankID,
+      operation_type: "inflow",
+      start_at: "2026-07-02T08:00:00Z",
+      end_at: "2026-07-02T09:00:00Z",
+      measured_mass_kg: 32000,
+      measurement_uncertainty_pct: 0.24,
+      counterparty_ref: "API-LATE-IN-002",
+      operation_status: "confirmed",
+    },
+  });
+  const gated = await api("gated balance readback", proxy, `/api/v1/balances/${gatedSubmitted.id}`, {
+    token: reviewer,
+  });
+  if (gated.data.balance_status !== "recalculate_required") {
+    fail("late confirmed transfer must flag the run as recalculate_required", gated);
+  }
+  if (!Array.isArray(gated.data.recalculation_reason_json) || gated.data.recalculation_reason_json[0]?.code !== "LATE_TRANSFER_CONFIRMED") {
+    fail("recalculation reason must be persisted and readable after refresh", gated);
+  }
+  await api("accept gated run forbidden", proxy, `/api/v1/balances/${gatedSubmitted.id}/review`, {
+    method: "POST",
+    token: reviewer,
+    status: 409,
+    errorCode: "BALANCE_RECALCULATE_REQUIRED",
+    body: {
+      target_status: "accepted",
+      version: gated.data.version,
+      review_note: "Reviewer attempt while gate is closed must be rejected.",
+    },
+  });
+  const replacement = await api("reviewer atomic recalculation", proxy, `/api/v1/balances/${gatedSubmitted.id}/recalculate`, {
+    method: "POST",
+    token: reviewer,
+    body: { version: gated.data.version },
+  });
+  if (
+    replacement.data.superseded.balance_status !== "superseded" ||
+    replacement.data.superseded.superseded_by_id !== replacement.data.recalculated.id ||
+    replacement.data.recalculated.balance_status !== "pending_review" ||
+    replacement.data.recalculated.supersedes_id !== replacement.data.superseded.id
+  ) {
+    fail("recalculation replacement chain is inconsistent", replacement);
+  }
+  await api("duplicate recalculation rejected", proxy, `/api/v1/balances/${gatedSubmitted.id}/recalculate`, {
+    method: "POST",
+    token: reviewer,
+    status: 409,
+    errorCode: "BALANCE_ALREADY_SUPERSEDED",
+    body: { version: replacement.data.superseded.version },
+  });
+  await api(
+    "accept recalculated run",
+    proxy,
+    `/api/v1/balances/${replacement.data.recalculated.id}/review`,
+    {
+      method: "POST",
+      token: reviewer,
+      body: {
+        target_status: "accepted",
+        version: replacement.data.recalculated.version,
+        review_note: "Recalculated with the late inflow evidence and now accepted.",
+      },
+    },
+  );
+  const refreshChain = await api(
+    "replacement chain readback",
+    proxy,
+    `/api/v1/balances/${gatedSubmitted.id}`,
+    { token: reviewer },
+  );
+  if (refreshChain.data.balance_status !== "superseded" || refreshChain.data.superseded_by_id !== replacement.data.recalculated.id) {
+    fail("replacement chain must read back consistently after refresh", refreshChain);
+  }
+
   const audits = await api(
     "audit query",
     proxy,
     "/api/v1/audits?page=1&page_size=100&entity_type=balance_run",
     { token: reviewer },
   );
-  if (audits.meta.total < 8) fail("balance audit trail is unexpectedly short", audits);
+  if (audits.meta.total < 10) fail("balance audit trail is unexpectedly short", audits);
+  const auditActions = audits.data.map((event) => event.action);
+  for (const expected of ["balance_run.recalculate_required", "balance_run.recalculated", "balance_run.superseded"]) {
+    if (!auditActions.includes(expected)) fail(`audit trail missing ${expected}`, audits);
+  }
 
   console.log("API_SMOKE_PASS");
   console.table(results);

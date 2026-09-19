@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Alert, Button, Form, Input, Modal, Select, Table, Tag } from 'antd'
-import { CheckCircle2, Play, RefreshCw, Send, XCircle } from 'lucide-react'
+import { Alert, Button, Form, Input, Modal, Popconfirm, Select, Table, Tag } from 'antd'
+import { ArrowLeftRight, CheckCircle2, Play, RefreshCw, Send, XCircle } from 'lucide-react'
 import { EvidenceBreakdownPanel } from '../components/common/EvidenceBreakdownPanel'
 import { MassBalanceWaterfall } from '../components/common/MassBalanceWaterfall'
 import { PageHeader } from '../components/common/PageHeader'
+import { RecalculationGateBanner } from '../components/common/RecalculationGateBanner'
 import { useAuth } from '../hooks/useAuth'
 import { useBalanceRun } from '../hooks/useBalanceRun'
 import { useTankStore } from '../stores/tankStore'
@@ -13,7 +14,17 @@ import { dateTime, kg, localInputDate, number } from '../utils/format'
 
 const statusLabels: Record<BalanceStatus, string> = {
   queued: '排队', calculating: '已计算', pending_review: '待复核',
-  accepted: '已接受', rejected: '已驳回', invalidated: '已作废'
+  accepted: '已接受', rejected: '已驳回', invalidated: '已作废',
+  recalculate_required: '待重算', superseded: '已替代'
+}
+
+const statusTagColor: Partial<Record<BalanceStatus, string>> = {
+  recalculate_required: 'orange',
+  superseded: 'default',
+  pending_review: 'processing',
+  accepted: 'success',
+  rejected: 'warning',
+  invalidated: 'error'
 }
 
 export function BalancesPage() {
@@ -27,6 +38,14 @@ export function BalancesPage() {
   const [reviewForm] = Form.useForm<{ note: string }>()
   useEffect(() => { void Promise.all([store.load(), tanks.load()]) }, [])
   const selected = useMemo(() => store.items.find((item) => item.id === store.selectedId) ?? store.items[0], [store.items, store.selectedId])
+  const predecessor = useMemo(
+    () => selected?.supersedes_id ? store.items.find((item) => item.id === selected.supersedes_id) : undefined,
+    [store.items, selected]
+  )
+  const successor = useMemo(
+    () => selected?.superseded_by_id ? store.items.find((item) => item.id === selected.superseded_by_id) : undefined,
+    [store.items, selected]
+  )
   const openRun = () => {
     runForm.setFieldsValue({ tank_id: tanks.items[0]?.id })
     setRunOpen(true)
@@ -79,6 +98,7 @@ export function BalancesPage() {
               </div>
             )}
           </div>
+          {selected && <RecalculationGateBanner run={selected} predecessor={predecessor} successor={successor} />}
           <EvidenceBreakdownPanel run={selected} />
         </div>
         <aside className="run-rail">
@@ -92,8 +112,17 @@ export function BalancesPage() {
             onRow={(item) => ({ onClick: () => store.select(item.id) })}
             rowClassName={(item) => item.id === selected?.id ? 'selected-row' : ''}
             columns={[
-              { title: '运行', key: 'run', render: (_, item) => <><strong>#{item.id} · {item.tank?.tank_code ?? item.tank_id}</strong><div className="secondary">{dateTime(item.period_end)}</div></> },
-              { title: '状态', dataIndex: 'balance_status', width: 92, render: (value: BalanceStatus) => <Tag>{statusLabels[value]}</Tag> }
+              {
+                title: '运行', key: 'run',
+                render: (_, item) => (
+                  <>
+                    <strong>#{item.id} · {item.tank?.tank_code ?? item.tank_id}</strong>
+                    {item.supersedes_id && <Tag className="chain-tag" color="success" icon={<ArrowLeftRight size={11} />}>替代 #{item.supersedes_id}</Tag>}
+                    <div className="secondary">{dateTime(item.period_end)}</div>
+                  </>
+                )
+              },
+              { title: '状态', dataIndex: 'balance_status', width: 92, render: (value: BalanceStatus) => <Tag color={statusTagColor[value]}>{statusLabels[value]}</Tag> }
             ]}
           />
           {selected && (
@@ -104,6 +133,24 @@ export function BalancesPage() {
                   <Button type="primary" icon={<CheckCircle2 size={16} />} onClick={() => openReview('accepted')} block>接受结果</Button>
                   <Button danger icon={<XCircle size={16} />} onClick={() => openReview('rejected')} block>驳回结果</Button>
                 </>
+              )}
+              {selected.balance_status === 'recalculate_required' && can('reviewer', 'admin') && (
+                <>
+                  <Popconfirm
+                    title="执行边界证据替代重算？"
+                    description="将基于最新边界证据生成新的待复核记录，并把当前记录原子置为已替代；重复或并发操作只会成功一次。"
+                    okText="执行替代重算"
+                    cancelText="取消"
+                    placement="top"
+                    onConfirm={() => void store.recalculate(selected)}
+                  >
+                    <Button type="primary" danger icon={<ArrowLeftRight size={16} />} loading={store.working} block>复核员替代重算</Button>
+                  </Popconfirm>
+                  <Button danger icon={<XCircle size={16} />} onClick={() => openReview('rejected')} block>驳回原运行</Button>
+                </>
+              )}
+              {selected.balance_status === 'recalculate_required' && (
+                <Alert type="warning" showIcon message="边界证据不完整，接受/提交入口已关闭，请先替代重算。" />
               )}
               {selected.review_note && <Alert type="info" showIcon message={selected.review_note} />}
             </div>
@@ -138,8 +185,8 @@ export function BalancesPage() {
           </Button>
         </Form>
       </Modal>
-      {user?.role === 'reviewer' && !store.items.some((item) => item.balance_status === 'pending_review') && (
-        <Alert className="bottom-alert" type="info" showIcon message="当前没有待独立复核的平衡运行。" />
+      {user?.role === 'reviewer' && !store.items.some((item) => item.balance_status === 'pending_review' || item.balance_status === 'recalculate_required') && (
+        <Alert className="bottom-alert" type="info" showIcon message="当前没有待独立复核或待重算的平衡运行。" />
       )}
     </>
   )

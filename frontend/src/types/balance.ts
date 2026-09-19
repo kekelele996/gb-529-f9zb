@@ -1,7 +1,28 @@
 import type { DeviationLevel } from './deviation'
 import type { StorageTank } from './tank'
 
-export type BalanceStatus = 'queued' | 'calculating' | 'pending_review' | 'accepted' | 'rejected' | 'invalidated'
+export type BalanceStatus =
+  | 'queued'
+  | 'calculating'
+  | 'pending_review'
+  | 'accepted'
+  | 'rejected'
+  | 'invalidated'
+  | 'recalculate_required'
+  | 'superseded'
+
+export interface RecalculationReason {
+  code: RecalculationReasonCode
+  entity_type: string
+  entity_id: number
+  detail: string
+  detected_at: string
+}
+
+export type RecalculationReasonCode =
+  | 'BOUNDARY_SNAPSHOT_CLOSER'
+  | 'LATE_TRANSFER_CONFIRMED'
+  | 'COEFFICIENT_VERSION_CHANGED'
 
 export interface BalanceRun {
   id: number
@@ -26,9 +47,18 @@ export interface BalanceRun {
   reviewed_by?: number
   review_note: string
   reviewed_at?: string
+  recalculation_reason_json?: RecalculationReason[]
+  supersedes_id?: number
+  superseded_by_id?: number
+  recalculated_at?: string
   created_at: string
   updated_at: string
   tank?: StorageTank
+}
+
+export interface RecalculationResult {
+  superseded: BalanceRun
+  recalculated: BalanceRun
 }
 
 export interface UncertaintyComponent {
