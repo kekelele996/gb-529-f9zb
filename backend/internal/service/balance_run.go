@@ -63,19 +63,77 @@ func (s *BalanceService) Run(ctx context.Context, request dto.RunBalanceRequest,
 	if tank.TankStatus != "active" {
 		return model.BalanceRun{}, api.NewError(409, "TANK_NOT_ACTIVE", "只有启用储罐可以运行质量平衡")
 	}
-	opening, closing, err := s.measurementRepo.BoundarySnapshots(ctx, tank.ID, start, end)
+	_, _, calculation, snapshotJSON, evidenceJSON, err := s.prepareCalculation(ctx, tank, start, end)
 	if err != nil {
 		return model.BalanceRun{}, err
+	}
+	run := buildCalculatedRun(tank, start, end, calculation, snapshotJSON, evidenceJSON, actor.UserID)
+	if err := s.repo.CreateCalculated(ctx, &run, actor); err != nil {
+		return model.BalanceRun{}, err
+	}
+	run.Tank = &tank
+	return run, nil
+}
+
+// Recalculate 对边界证据完整性闸门挂起的旧运行重新计算并生成替代后继记录。
+func (s *BalanceService) Recalculate(ctx context.Context, predecessorID uint, request dto.RecalculateBalanceRequest, actor repository.Actor) (model.BalanceRun, error) {
+	if !constants.CanAnalyze(actor.Role) {
+		return model.BalanceRun{}, api.ErrForbidden
+	}
+	predecessor, err := s.repo.Get(ctx, predecessorID)
+	if err != nil {
+		return model.BalanceRun{}, err
+	}
+	if predecessor.BalanceStatus != constants.BalanceRecalculationRequired {
+		return model.BalanceRun{}, api.WithDetails(api.NewError(409, "RECALCULATION_NOT_REQUIRED", "只有待重算状态的运行可以发起重新计算"), map[string]any{
+			"current": predecessor.BalanceStatus,
+		})
+	}
+	if predecessor.Version != request.Version {
+		return model.BalanceRun{}, api.NewError(409, "BALANCE_VERSION_CONFLICT", "平衡运行版本已变化，请刷新后重试")
+	}
+	if _, hasActiveSuccessor, successorErr := s.repo.ActiveSuccessor(ctx, predecessorID); successorErr != nil {
+		return model.BalanceRun{}, successorErr
+	} else if hasActiveSuccessor {
+		return model.BalanceRun{}, api.NewError(409, "RECALCULATION_ALREADY_EXISTS", "该运行已存在活跃的重算后继记录，请刷新后处理后继记录")
+	}
+	tank, err := s.tankRepo.Get(ctx, predecessor.TankID)
+	if err != nil {
+		return model.BalanceRun{}, err
+	}
+	if tank.TankStatus != "active" {
+		return model.BalanceRun{}, api.NewError(409, "TANK_NOT_ACTIVE", "只有启用储罐可以运行质量平衡")
+	}
+	_, _, calculation, snapshotJSON, evidenceJSON, err := s.prepareCalculation(ctx, tank, predecessor.PeriodStart, predecessor.PeriodEnd)
+	if err != nil {
+		return model.BalanceRun{}, err
+	}
+	successor := buildCalculatedRun(tank, predecessor.PeriodStart, predecessor.PeriodEnd, calculation, snapshotJSON, evidenceJSON, actor.UserID)
+	if err := s.repo.CreateRecalculation(ctx, predecessorID, request.Version, &successor, actor); err != nil {
+		return model.BalanceRun{}, err
+	}
+	successor.Tank = &tank
+	return successor, nil
+}
+
+func (s *BalanceService) prepareCalculation(ctx context.Context, tank model.StorageTank, start, end time.Time) (model.MeasurementSnapshot, model.MeasurementSnapshot, calculatedBalance, []byte, []byte, error) {
+	opening, closing, err := s.measurementRepo.BoundarySnapshots(ctx, tank.ID, start, end)
+	if err != nil {
+		return model.MeasurementSnapshot{}, model.MeasurementSnapshot{}, calculatedBalance{}, nil, nil, err
 	}
 	transfers, err := s.transferRepo.ConfirmedForPeriod(ctx, tank.ID, start, end)
 	if err != nil {
-		return model.BalanceRun{}, err
+		return model.MeasurementSnapshot{}, model.MeasurementSnapshot{}, calculatedBalance{}, nil, nil, err
 	}
 	calculation, snapshotJSON, evidenceJSON, err := calculateBalanceRun(tank, opening, closing, transfers, start, end)
 	if err != nil {
-		return model.BalanceRun{}, err
+		return model.MeasurementSnapshot{}, model.MeasurementSnapshot{}, calculatedBalance{}, nil, nil, err
 	}
-	run := model.BalanceRun{
+	return opening, closing, calculation, snapshotJSON, evidenceJSON, nil
+}
+
+func buildCalculatedRun(tank model.StorageTank, start, end time.Time, calculation calculatedBalance, snapshotJSON, evidenceJSON []byte, createdBy uint) model.BalanceRun {
+	return model.BalanceRun{
 		TankID:             tank.ID,
 		PeriodStart:        start,
 		PeriodEnd:          end,
@@ -93,13 +151,8 @@ func (s *BalanceService) Run(ctx context.Context, request dto.RunBalanceRequest,
 		DeviationLevel:     calculation.DeviationLevel,
 		CoefficientVersion: tank.CoefficientVersion,
 		Version:            2,
-		CreatedBy:          actor.UserID,
+		CreatedBy:          createdBy,
 	}
-	if err := s.repo.CreateCalculated(ctx, &run, actor); err != nil {
-		return model.BalanceRun{}, err
-	}
-	run.Tank = &tank
-	return run, nil
 }
 
 type calculatedBalance struct {
@@ -216,6 +269,13 @@ func (s *BalanceService) Submit(ctx context.Context, id uint, request dto.Submit
 	if !constants.CanAnalyze(actor.Role) {
 		return model.BalanceRun{}, api.ErrForbidden
 	}
+	current, err := s.repo.Get(ctx, id)
+	if err != nil {
+		return model.BalanceRun{}, err
+	}
+	if current.BalanceStatus == constants.BalanceRecalculationRequired {
+		return model.BalanceRun{}, api.NewError(409, "RECALCULATION_REQUIRED", "边界证据完整性闸门已命中，请重新计算生成新记录后再提交复核")
+	}
 	return s.repo.Transition(ctx, id, request.Version, constants.BalancePendingReview, "提交独立复核", nil, actor)
 }
 
@@ -226,8 +286,38 @@ func (s *BalanceService) Review(ctx context.Context, id uint, request dto.Review
 	if request.TargetStatus != constants.BalanceAccepted && request.TargetStatus != constants.BalanceRejected {
 		return model.BalanceRun{}, api.NewError(422, "INVALID_REVIEW_DECISION", "复核目标状态只能是 accepted 或 rejected")
 	}
+	current, err := s.repo.Get(ctx, id)
+	if err != nil {
+		return model.BalanceRun{}, err
+	}
+	if current.BalanceStatus == constants.BalanceRecalculationRequired {
+		if _, hasSuccessor, successorErr := s.repo.ActiveSuccessor(ctx, id); successorErr != nil {
+			return model.BalanceRun{}, successorErr
+		} else if hasSuccessor {
+			return model.BalanceRun{}, api.NewError(409, "REPLACEMENT_REQUIRED", "该运行已生成重算后继，复核员必须接受后继并原子替代，不能直接接受或驳回旧记录")
+		}
+		return model.BalanceRun{}, api.NewError(409, "RECALCULATION_REQUIRED", "边界证据完整性闸门已命中，请先重新计算生成新记录")
+	}
+	if request.TargetStatus == constants.BalanceAccepted && current.SupersedesID != nil && current.BalanceStatus == constants.BalancePendingReview {
+		predecessor, predecessorErr := s.repo.Get(ctx, *current.SupersedesID)
+		if predecessorErr != nil {
+			return model.BalanceRun{}, predecessorErr
+		}
+		if predecessor.BalanceStatus == constants.BalanceRecalculationRequired {
+			return model.BalanceRun{}, api.NewError(409, "REPLACEMENT_REQUIRED", "重算后继记录必须通过替代操作原子接受，请对旧运行执行替代")
+		}
+	}
 	note := strings.TrimSpace(request.ReviewNote)
 	return s.repo.Transition(ctx, id, request.Version, request.TargetStatus, note, &actor.UserID, actor)
+}
+
+// Replace 由复核员接受重算后继并原子关闭替代链；重复或并发替代只能成功一次。
+func (s *BalanceService) Replace(ctx context.Context, predecessorID uint, request dto.ReplaceBalanceRequest, actor repository.Actor) (model.BalanceRun, error) {
+	if !constants.CanReview(actor.Role) {
+		return model.BalanceRun{}, api.ErrForbidden
+	}
+	note := strings.TrimSpace(request.ReviewNote)
+	return s.repo.ReplaceByAcceptedSuccessor(ctx, predecessorID, request.SuccessorID, request.PredecessorVersion, request.SuccessorVersion, note, actor)
 }
 
 func (s *BalanceService) Invalidate(ctx context.Context, id uint, request dto.InvalidateBalanceRequest, actor repository.Actor) (model.BalanceRun, error) {

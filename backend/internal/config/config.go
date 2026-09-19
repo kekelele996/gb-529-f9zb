@@ -101,14 +101,62 @@ func OpenDatabase(cfg Config) (*gorm.DB, error) {
 }
 
 func migrate(db *gorm.DB) error {
-	return db.AutoMigrate(
+	if err := db.AutoMigrate(
 		&model.User{},
 		&model.StorageTank{},
 		&model.MeasurementSnapshot{},
 		&model.TransferOperation{},
 		&model.BalanceRun{},
 		&model.AuditEvent{},
-	)
+	); err != nil {
+		return err
+	}
+	if db.Dialector.Name() == "postgres" {
+		if err := replaceBalanceStatusCheck(db); err != nil {
+			return fmt.Errorf("refresh balance status check constraint: %w", err)
+		}
+	}
+	return nil
+}
+
+// replaceBalanceStatusCheck 用包含新状态的检查约束替换旧约束。AutoMigrate 不会修改
+// PostgreSQL 已有列上的 check，因此仅在旧约束缺少 recalculation_required 时替换，
+// 全新数据库或已升级的库幂等跳过。
+func replaceBalanceStatusCheck(db *gorm.DB) error {
+	var constraintName string
+	find := db.Raw(`
+		SELECT con.conname
+		FROM pg_constraint con
+		JOIN pg_class rel ON rel.oid = con.conrelid
+		WHERE rel.relname = ? AND con.contype = 'c' AND pg_get_constraintdef(con.oid) LIKE ?`,
+		"balance_runs", "%balance_status IN%").Scan(&constraintName)
+	if find.Error != nil {
+		return find.Error
+	}
+	if constraintName == "" {
+		// AutoMigrate 未创建检查约束（异常或旧 SQLite 无关路径），幂等补建。
+		return db.Exec(`ALTER TABLE balance_runs
+			ADD CONSTRAINT chk_balance_runs_balance_status CHECK
+			(balance_status IN ('queued','calculating','pending_review','accepted','rejected','invalidated','recalculation_required','replaced'))`).Error
+	}
+	var outdated int
+	if err := db.Raw(`
+		SELECT COUNT(*)
+		FROM pg_constraint con
+		JOIN pg_class rel ON rel.oid = con.conrelid
+		WHERE con.conname = ? AND pg_get_constraintdef(con.oid) NOT LIKE ?`,
+		constraintName, "%recalculation_required%").Scan(&outdated).Error; err != nil {
+		return err
+	}
+	if outdated == 0 {
+		return nil
+	}
+	if err := db.Exec(fmt.Sprintf("ALTER TABLE balance_runs DROP CONSTRAINT %q", constraintName)).Error; err != nil {
+		return err
+	}
+	return db.Exec(`ALTER TABLE balance_runs
+		ADD CONSTRAINT chk_balance_runs_balance_status CHECK
+		(balance_status IN ('queued','calculating','pending_review','accepted','rejected','invalidated','recalculation_required','replaced'))`).Error
 }
 
 func seed(db *gorm.DB) error {

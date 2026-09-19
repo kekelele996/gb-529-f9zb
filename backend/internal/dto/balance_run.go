@@ -27,6 +27,17 @@ type InvalidateBalanceRequest struct {
 	Reason  string `json:"reason" binding:"required,min=6,max=1000"`
 }
 
+type RecalculateBalanceRequest struct {
+	Version uint `json:"version" binding:"required"`
+}
+
+type ReplaceBalanceRequest struct {
+	SuccessorID        uint   `json:"successor_id" binding:"required"`
+	PredecessorVersion uint   `json:"predecessor_version" binding:"required"`
+	SuccessorVersion   uint   `json:"successor_version" binding:"required"`
+	ReviewNote         string `json:"review_note" binding:"required,min=6,max=1000"`
+}
+
 type UncertaintyComponent struct {
 	Source         string  `json:"source"`
 	EntityID       uint    `json:"entity_id"`

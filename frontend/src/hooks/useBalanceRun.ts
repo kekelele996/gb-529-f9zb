@@ -50,5 +50,27 @@ export function useBalanceRun() {
     }
   }, [store.review])
 
-  return { ...store, working, run, submit, review }
+  const recalculate = useCallback(async (item: BalanceRun) => {
+    setWorking(true)
+    try {
+      const successor = await store.recalculate(item)
+      await store.load()
+      return getBalance(successor.id)
+    } finally {
+      setWorking(false)
+    }
+  }, [store])
+
+  const replace = useCallback(async (predecessor: BalanceRun, successor: BalanceRun, note: string) => {
+    setWorking(true)
+    try {
+      const accepted = await store.replace(predecessor, successor, note)
+      await store.load()
+      return getBalance(accepted.id)
+    } finally {
+      setWorking(false)
+    }
+  }, [store])
+
+  return { ...store, working, run, submit, review, recalculate, replace }
 }

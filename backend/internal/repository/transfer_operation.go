@@ -86,6 +86,9 @@ func (r *TransferRepository) Create(ctx context.Context, item *model.TransferOpe
 		if err := tx.Create(&audit).Error; err != nil {
 			return fmt.Errorf("audit transfer operation: %w", err)
 		}
+		if err := GateTransferConfirmed(tx, ctx, *item, actor); err != nil {
+			return err
+		}
 		return nil
 	})
 }
@@ -125,6 +128,11 @@ func (r *TransferRepository) Transition(ctx context.Context, id, version uint, t
 		audit := NewAudit(actor, "transfer_operation."+target, "transfer_operation", id, before, map[string]any{"record": updated, "reason": reason})
 		if err := tx.Create(&audit).Error; err != nil {
 			return fmt.Errorf("audit transfer transition: %w", err)
+		}
+		if target == "confirmed" {
+			if err := GateTransferConfirmed(tx, ctx, updated, actor); err != nil {
+				return err
+			}
 		}
 		return nil
 	})

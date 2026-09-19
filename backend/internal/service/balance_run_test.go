@@ -57,6 +57,10 @@ func TestBalanceStateMachine(t *testing.T) {
 		{constants.BalanceCalculating, constants.BalancePendingReview},
 		{constants.BalancePendingReview, constants.BalanceAccepted},
 		{constants.BalancePendingReview, constants.BalanceRejected},
+		{constants.BalanceCalculating, constants.BalanceRecalculationRequired},
+		{constants.BalancePendingReview, constants.BalanceRecalculationRequired},
+		{constants.BalanceRecalculationRequired, constants.BalanceReplaced},
+		{constants.BalanceRecalculationRequired, constants.BalanceInvalidated},
 	}
 	for _, transition := range valid {
 		if !constants.CanTransitionBalance(transition.from, transition.to) {
@@ -65,5 +69,11 @@ func TestBalanceStateMachine(t *testing.T) {
 	}
 	if constants.CanTransitionBalance(constants.BalanceAccepted, constants.BalanceCalculating) {
 		t.Fatal("accepted result must remain immutable")
+	}
+	if constants.CanTransitionBalance(constants.BalanceRecalculationRequired, constants.BalancePendingReview) {
+		t.Fatal("recalculation_required must not fall back to pending_review")
+	}
+	if constants.CanTransitionBalance(constants.BalanceReplaced, constants.BalanceAccepted) {
+		t.Fatal("replaced result must remain terminal")
 	}
 }

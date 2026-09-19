@@ -15,4 +15,11 @@ export const reviewBalance = (id: number, version: number, targetStatus: Extract
   })
 export const invalidateBalance = (id: number, version: number, reason: string) =>
   request<BalanceRun>(`/balances/${id}/invalidate`, { method: 'POST', body: JSON.stringify({ version, reason }) })
+export const recalculateBalance = (id: number, version: number) =>
+  request<BalanceRun>(`/balances/${id}/recalculate`, { method: 'POST', body: JSON.stringify({ version }) })
+export const replaceBalance = (
+  predecessorId: number,
+  payload: { successor_id: number; predecessor_version: number; successor_version: number; review_note: string }
+) =>
+  request<BalanceRun>(`/balances/${predecessorId}/replace`, { method: 'POST', body: JSON.stringify(payload) })
 export const getUncertainty = (id: number) => request<UncertaintyBreakdown>(`/balances/${id}/uncertainty`)

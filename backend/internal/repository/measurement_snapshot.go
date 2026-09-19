@@ -85,6 +85,9 @@ func (r *MeasurementRepository) Create(ctx context.Context, snapshot *model.Meas
 		if err := tx.Create(&audit).Error; err != nil {
 			return fmt.Errorf("audit measurement snapshot: %w", err)
 		}
+		if err := GateSnapshotCreated(tx, ctx, *snapshot, actor); err != nil {
+			return err
+		}
 		return nil
 	})
 }

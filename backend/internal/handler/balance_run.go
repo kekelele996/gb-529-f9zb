@@ -83,6 +83,48 @@ func (h *BalanceHandler) Submit(c *gin.Context) {
 	api.Success(c, http.StatusOK, item)
 }
 
+func (h *BalanceHandler) Recalculate(c *gin.Context) {
+	id, ok := parseID(c, "id")
+	if !ok {
+		return
+	}
+	actor, ok := actorFromContext(c)
+	if !ok {
+		return
+	}
+	var request dto.RecalculateBalanceRequest
+	if !bindJSON(c, &request) {
+		return
+	}
+	item, err := h.service.Recalculate(c.Request.Context(), id, request, actor)
+	if err != nil {
+		api.Fail(c, err)
+		return
+	}
+	api.Success(c, http.StatusCreated, item)
+}
+
+func (h *BalanceHandler) Replace(c *gin.Context) {
+	id, ok := parseID(c, "id")
+	if !ok {
+		return
+	}
+	actor, ok := actorFromContext(c)
+	if !ok {
+		return
+	}
+	var request dto.ReplaceBalanceRequest
+	if !bindJSON(c, &request) {
+		return
+	}
+	item, err := h.service.Replace(c.Request.Context(), id, request, actor)
+	if err != nil {
+		api.Fail(c, err)
+		return
+	}
+	api.Success(c, http.StatusOK, item)
+}
+
 func (h *BalanceHandler) Review(c *gin.Context) {
 	id, ok := parseID(c, "id")
 	if !ok {

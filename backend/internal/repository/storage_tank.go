@@ -90,6 +90,9 @@ func (r *TankRepository) Update(ctx context.Context, updated, before model.Stora
 		if err := tx.Create(&audit).Error; err != nil {
 			return fmt.Errorf("audit storage tank update: %w", err)
 		}
+		if err := GateCoefficientVersionUpdated(tx, ctx, updated.ID, before.CoefficientVersion, updated.CoefficientVersion, actor); err != nil {
+			return err
+		}
 		return nil
 	})
 	return updated, err
